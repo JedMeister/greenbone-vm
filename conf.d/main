@@ -1,0 +1,302 @@
+#!/bin/bash -ex
+
+# set proxy for github
+export http_proxy=http://localhost:3128
+export https_proxy=http://localhost:3128
+
+USER=gvm
+G_HOME=/home/$USER
+TMP=/tmp/$USER
+
+# set component version(s) to install
+GVM_VERSION="v22.4.0"
+GVM_LIBS_VERSION=$GVM_VERSION
+GVMD_VERSION=$GVM_VERSION
+PG_GVM_VERSION=$GVM_VERSION
+GSA_VERSION=$GVM_VERSION
+GSAD_VERSION=$GVM_VERSION
+OPENVAS_SMB_VERSION=$GVM_VERSION
+OPENVAS_SCANNER_VERSION=$GVM_VERSION
+OSPD_OPENVAS_VERSION="v22.4.2"
+NOTUS_VERSION="v22.4.1"
+
+GVM_GIT="https://github.com/greenbone"
+INSTALL_PREFIX="/usr/local"
+SRC="$INSTALL_PREFIX/src/$USER"
+SOURCE_DIR="$SRC/source"
+BUILD_DIR="$SRC/build"
+
+clone() {
+    pkg=$1
+    version=$2
+    git clone --branch=$version --depth=1 $GVM_GIT/$pkg $SOURCE_DIR/$pkg
+}
+
+clone_build_install() {
+    pkg=$1
+    shift
+    version=$1
+    shift
+    clone $pkg $version
+    mkdir $BUILD_DIR/$pkg
+    cd $BUILD_DIR/$pkg
+    cmake $SOURCE_DIR/$pkg $@
+    make -j$(nproc)
+    make DESTDIR=/ install
+}
+
+## initial setup
+mkdir -p $SOURCE_DIR $BUILD_DIR $INSTALL_DIR
+
+# create GVM sudo user
+useradd -r -M -U -G sudo -s /usr/sbin/nologin $USER
+usermod -aG $USER $USER
+cat >> /etc/sudoers <<EOF
+
+# allow users of the gvm group run openvas
+%gvm ALL = NOPASSWD: /usr/local/sbin/openvas
+EOF
+
+mkdir -p $G_HOME/.bashrc.d
+cat > $G_HOME/.bashrc.d/turnkey-gvm <<EOF
+# Ensure /usr/local/sbin in is GVM user PATH
+export PATH=$PATH:/usr/local/sbin
+EOF
+chown $USER:$USER $G_HOME/.bashrc.d/turnkey-gvm
+chmod +x $G_HOME/.bashrc.d/turnkey-gvm
+
+# gvm-lib - shared C library
+clone_build_install gvm-libs $GVM_LIBS_VERSION \
+  -DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DSYSCONFDIR=/etc \
+  -DLOCALSTATEDIR=/var
+
+# gvmd - gvm daemon
+clone_build_install gvmd $GVMD_VERSION \
+  -DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLOCALSTATEDIR=/var \
+  -DSYSCONFDIR=/etc \
+  -DGVM_DATA_DIR=/var \
+  -DGVMD_RUN_DIR=/run/gvmd \
+  -DOPENVAS_DEFAULT_SOCKET=/run/ospd/ospd-openvas.sock \
+  -DGVM_FEED_LOCK_PATH=/var/lib/gvm/feed-update.lock \
+  -DSYSTEMD_SERVICE_DIR=/lib/systemd/system \
+  -DLOGROTATE_DIR=/etc/logrotate.d
+
+# pg-gvm - postgresql extension
+clone_build_install pg-gvm $PG_GVM_VERSION \
+  -DCMAKE_BUILD_TYPE=Release
+
+# gsa - webserver (gsad) & web app (GSA)
+clone_build_install gsad $GSAD_VERSION \
+  -DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DSYSCONFDIR=/etc \
+  -DLOCALSTATEDIR=/var \
+  -DGVMD_RUN_DIR=/run/gvmd \
+  -DGSAD_RUN_DIR=/run/gsad \
+  -DLOGROTATE_DIR=/etc/logrotate.d
+
+# GSA requires nodejs v14.x
+n 14
+n prune
+clone gsa $GSA_VERSION
+cd $SOURCE_DIR/gsa
+rm -rf build
+yarn config set cafile /usr/local/share/ca-certificates/squid_proxyCA.crt
+yarn
+yarn build
+mkdir -p $INSTALL_PREFIX/share/gvm/gsad/web/
+mv build/* $INSTALL_PREFIX/share/gvm/gsad/web/
+
+# openvas-smb - helper module for openvas-scanner with Win
+clone_build_install openvas-smb $OPENVAS_SMB_VERSION \
+  -DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX \
+  -DCMAKE_BUILD_TYPE=Release
+
+# openvas-scanner - scan engine
+clone_build_install openvas-scanner $OPENVAS_SCANNER_VERSION \
+  -DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DSYSCONFDIR=/etc \
+  -DLOCALSTATEDIR=/var \
+  -DOPENVAS_FEED_LOCK_PATH=/var/lib/openvas/feed-update.lock \
+  -DOPENVAS_RUN_DIR=/run/ospd
+
+# ospd-openvas - open scanner protocol server
+clone ospd-openvas $OSPD_OPENVAS_VERSION
+cd $SOURCE_DIR/ospd-openvas
+python3 -m pip install . --prefix=$INSTALL_PREFIX --root=/ --no-warn-script-location
+
+# notus-scanner - evaluates info from openvas-scanner
+clone notus-scanner $NOTUS_VERSION
+cd $SOURCE_DIR/notus-scanner
+python3 -m pip install . --prefix=$INSTALL_PREFIX --root=/ --no-warn-script-location
+
+# gvm-tools - remote control tools
+python3 -m pip install --prefix=$INSTALL_PREFIX --root=/ --no-warn-script-location gvm-tools
+
+# set up redis
+cp $SOURCE_DIR/openvas-scanner/config/redis-openvas.conf /etc/redis/
+echo "db_address = /run/redis-openvas/redis.sock" >> /etc/openvas/openvas.conf
+chown redis:redis /etc/redis/redis-openvas.conf
+
+systemctl enable redis-server@openvas.service
+usermod -aG redis gvm
+
+# set up mosquitto MQTT broker
+systemctl enable mosquitto.service
+echo "mqtt_server_uri = localhost:1883" >> /etc/openvas/openvas.conf
+
+# set directory permissions
+mkdir -p /var/lib/notus
+mkdir -p /run/gvmd
+
+chown -R $USER:$USER /var/lib/gvm
+chown -R $USER:$USER /var/lib/openvas
+chown -R $USER:$USER /var/lib/notus
+chown -R $USER:$USER /var/log/gvm
+chown -R $USER:$USER /run/gvmd
+
+chmod -R g+srw /var/lib/gvm
+chmod -R g+srw /var/lib/openvas
+chmod -R g+srw /var/log/gvm
+
+# allow group gvm access to the postgres db via gvmd
+chown $USER:$USER /usr/local/sbin/gvmd
+chmod 6750 /usr/local/sbin/gvmd
+
+# allow only gvm user to execute feed sync script
+chown $USER:$USER /usr/local/bin/greenbone-nvt-sync
+chmod 740 /usr/local/sbin/greenbone-feed-sync
+chown $USER:$USER /usr/local/sbin/greenbone-*-sync
+chmod 740 /usr/local/sbin/greenbone-*-sync
+
+# set up Greenbone Community Feed integrity key (to validate the feed content)
+curl -f -L https://www.greenbone.net/GBCommunitySigningKey.asc \
+    -o /tmp/GBCommunitySigningKey.asc
+echo "8AE4BE429B60A59B311C2E739823FAA60ED1E580:6:" > /tmp/ownertrust.txt
+export GNUPGHOME=/etc/openvas/gnupg
+mkdir -p $GNUPGHOME
+curl -f -L https://www.greenbone.net/GBCommunitySigningKey.asc \
+    | gpg --import /tmp/GBCommunitySigningKey.asc
+echo "8AE4BE429B60A59B311C2E739823FAA60ED1E580:6:" | gpg --import-ownertrust
+
+# setup postgres
+systemctl start postgresql@13-main
+sudo -u postgres bash
+createuser -DRS gvm
+createdb -O gvm gvmd
+psql gvmd
+create role dba with superuser noinherit;
+grant dba to gvm;
+exit
+
+# set up the feed import owner
+gvmd --create-user=admin
+gvmd --create-user=admin --password=$(mcookie)
+gvmd --modify-setting 78eceaec-3385-11ea-b237-28d24461215b \
+    --value `gvmd --get-users --verbose | grep admin | awk '{print $2}'`
+
+# create systemd services
+cat > /etc/systemd/system/ospd-openvas.service <<EOF
+[Unit]
+Description=OSPd Wrapper for the OpenVAS Scanner (ospd-openvas)
+Documentation=man:ospd-openvas(8) man:openvas(8)
+After=network.target networking.service redis-server@openvas.service
+Wants=redis-server@openvas.service
+ConditionKernelCommandLine=!recovery
+
+[Service]
+Type=forking
+User=gvm
+Group=gvm
+RuntimeDirectory=ospd
+RuntimeDirectoryMode=2775
+PIDFile=/run/ospd/ospd-openvas.pid
+ExecStart=/usr/local/bin/ospd-openvas --unix-socket /run/ospd/ospd-openvas.sock --pid-file /run/ospd/ospd-openvas.pid --log-file /var/log/gvm/ospd-openvas.log --lock-file-dir /var/lib/openvas --socket-mode 0o770 --mqtt-broker-address localhost --mqtt-broker-port 1883 --notus-feed-dir /var/lib/notus/advisories
+SuccessExitStatus=SIGKILL
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/notus-scanner.service cat <<EOF
+[Unit]
+Description=Notus Scanner
+Documentation=https://github.com/greenbone/notus-scanner
+After=mosquitto.service
+Wants=mosquitto.service
+ConditionKernelCommandLine=!recovery
+
+[Service]
+Type=forking
+User=gvm
+RuntimeDirectory=notus-scanner
+RuntimeDirectoryMode=2775
+PIDFile=/run/notus-scanner/notus-scanner.pid
+ExecStart=/usr/local/bin/notus-scanner --products-directory /var/lib/notus/products --log-file /var/log/gvm/notus-scanner.log
+SuccessExitStatus=SIGKILL
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/gvmd.service <<EOF
+[Unit]
+Description=Greenbone Vulnerability Manager daemon (gvmd)
+After=network.target networking.service postgresql.service ospd-openvas.service
+Wants=postgresql.service ospd-openvas.service
+Documentation=man:gvmd(8)
+ConditionKernelCommandLine=!recovery
+
+[Service]
+Type=forking
+User=gvm
+Group=gvm
+PIDFile=/run/gvmd/gvmd.pid
+RuntimeDirectory=gvmd
+RuntimeDirectoryMode=2775
+ExecStart=/usr/local/sbin/gvmd --osp-vt-update=/run/ospd/ospd-openvas.sock --listen-group=gvm
+Restart=always
+TimeoutStopSec=10
+i
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/gsad.service <<EOF
+[Unit]
+Description=Greenbone Security Assistant daemon (gsad)
+Documentation=man:gsad(8) https://www.greenbone.net
+After=network.target gvmd.service
+Wants=gvmd.service
+
+[Service]
+Type=exec
+User=gvm
+Group=gvm
+RuntimeDirectory=gsad
+RuntimeDirectoryMode=2775
+PIDFile=/run/gsad/gsad.pid
+ExecStart=/usr/local/sbin/gsad --foreground --listen=127.0.0.1 --port=9392 --http-only
+Restart=always
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
+Alias=greenbone-security-assistant.service
+EOF
+
+systemctl enable ospd-openvas notus-scanner gvmd gsad
+
+exit 1
+# clean up
+rm -rf $BUILD_DIR
+rm /usr/local/share/.yarnrc

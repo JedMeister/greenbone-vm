@@ -1,0 +1,107 @@
+#include <turnkey/base>
+
+/* GVM dependencies - default TKL packages excluded */
+
+/* common/general dependencies */
+sudo
+build-essential
+cmake
+pkg-config
+redis-server
+mosquitto
+postgresql
+
+/* gvm-libs dependencies */
+libglib2.0-dev
+libgpgme-dev
+libgnutls28-dev
+uuid-dev
+libssh-gcrypt-dev
+libhiredis-dev
+libxml2-dev
+libpcap-dev
+libnet1-dev
+libpaho-mqtt-dev
+
+/* optional gvm-libs dependencies */
+libldap2-dev
+libradcli-dev
+
+/* gvmd dependencies */
+libglib2.0-dev
+libgnutls28-dev
+libpq-dev
+postgresql-server-dev-13
+libical-dev
+xsltproc
+libbsd-dev
+libgpgme-dev
+
+/* optional gvmd dependencies */
+texlive-latex-extra         /* PDF reports */
+texlive-fonts-recommended   /* PDF reports */
+xsltproc                    /* HTML reports */
+fakeroot                    /* generating credential DEB packages */
+nsis                        /* generating credential EXE packages */
+sshpass                     /* SCP alert */
+socat                       /* Send alert */
+snmp                        /* SMNP alert */
+smbclient                   /* SMB alert */
+gpgsm                       /* S/MIME support - e.g. email encryption */
+xml-twig-tools              /* recommended - lower sync RAM usage */
+
+/* pg-gvm dependencies */
+libglib2.0-dev
+postgresql-server-dev-13
+libical-dev
+
+/* gsad dependencies */
+libmicrohttpd-dev
+libxml2-dev
+libglib2.0-dev
+libgnutls28-dev
+
+/* openvas-smb dependencies */
+gcc-mingw-w64
+libgnutls28-dev
+libglib2.0-dev
+libpopt-dev
+libunistring-dev
+heimdal-dev
+perl-base
+
+/* openvas-scanner dependencies */
+bison
+libglib2.0-dev
+libgnutls28-dev
+libgcrypt20-dev
+libpcap-dev
+libgpgme-dev
+libksba-dev
+nmap
+libjson-glib-dev
+libbsd-dev
+
+/* optional openvas-scanner dependencies */
+python3-impacket
+libsnmp-dev
+
+/* ospd-openvas dependencies */
+python3-pip
+python3-setuptools
+python3-packaging
+python3-wrapt
+python3-cffi
+python3-psutil
+python3-lxml
+python3-defusedxml
+python3-paramiko
+python3-redis
+python3-paho-mqtt
+
+/* notus-scanner dependencies */
+python3-gnupg
+
+/* gvm-tools dependencies */
+python3-lxml
+python3-defusedxml
